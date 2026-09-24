@@ -1,0 +1,24 @@
+# Entorno virtual y cachés de Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Resultados temporales de PyInstaller
+build/
+dist/
+Output/
+*.toc
+*.pyz
+
+# Configuración local de la aplicación
+.cheatext/
+config.json
+*.env
+.env*
+
+# Archivos generados por el sistema
+.DS_Store
+Thumbs.db
+
+# Los instaladores se publican como archivos adjuntos de GitHub Releases.
+listo/
