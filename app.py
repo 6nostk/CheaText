@@ -1,29 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-CheaText Full - Desktop
-============================
+CheaText Full - Desktop (Versión Inteligente Universal)
+======================================================
 
 Programa de escritorio (Windows) que funciona en CUALQUIER campo de texto del
-sistema operativo (Word, Discord, WhatsApp Desktop, el navegador, Notas, etc.),
-no solo en páginas web.
+sistema operativo (Word, Discord, WhatsApp Desktop, el navegador, Notas, etc.).
 
 Atajo global: Alt + Enter
-  1. Lee el texto del campo donde esté el cursor (vía Ctrl+A + Ctrl+C).
-  2. Lo envía a la IA configurada (con respaldo automático entre varios
-     proveedores si el principal se queda sin cuota).
-  3. Reemplaza el texto en el campo con el resultado corregido, simulando
-     pulsaciones de teclado REALES a nivel de sistema operativo — por eso
-     es compatible incluso con editores complejos como el chat de Twitch,
-     a diferencia de la extensión de navegador (que está limitada por las
-     protecciones de seguridad del propio navegador).
-  4. Muestra una notificación con el proveedor usado. NO envía el mensaje
-     automáticamente (no simula Enter) — tú decides cuándo enviarlo.
+  1. Si hay texto seleccionado, lo usa. Si no, selecciona automáticamente
+     todo lo escrito en la casilla (End -> Ctrl+Shift+Home).
+  2. Lo envía a la IA configurada (con respaldo automático entre proveedores).
+  3. Reemplaza el texto con el resultado corregido.
+  4. Muestra una notificación con el proveedor usado. No envía el mensaje
+     automáticamente salvo que actives esa opción.
 
 Requisitos: Python 3.10+, ver requirements.txt
 Ejecutar:   python app.py
 Empaquetar: pyinstaller --onefile --noconsole --name cheatext app.py
 """
-
+import os
 import base64
 import copy
 import ctypes
@@ -50,7 +45,14 @@ from PIL import Image, ImageDraw
 
 CONFIG_DIR = Path.home() / ".cheatext"
 CONFIG_PATH = CONFIG_DIR / "config.json"
-ICON_PATH = Path(__file__).with_name("CT.ico")
+# Lógica de producción: detecta si corre como código suelto o como ejecutable .exe congelado
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable))
+else:
+    BASE_DIR = Path(__file__).parent
+
+ICON_PATH = BASE_DIR / "CT.ico"
+
 DPAPI_PREFIX = "dpapi:"
 
 APP_NAME = "CheaText"
@@ -201,8 +203,7 @@ TONE_DESCRIPTIONS = {
 EXHAUSTION_COOLDOWN_S = 24 * 60 * 60  # 24h por defecto si el proveedor no dice Retry-After
 MAX_RETRIES_PER_PROVIDER = 1
 RETRY_DELAY_S = 1.0
-HOTKEY = "alt+enter"  # TEMPORAL: probando si Alt+Enter solo funciona bien ahora que
-# el Ctrl+A automático es opcional (sospecha: el culpable real era el Ctrl+A, no Alt).
+HOTKEY = "alt+enter"
 
 
 def default_config():
@@ -214,21 +215,6 @@ def default_config():
         "to_lang": DEFAULT_TO_LANG,
         "shorten_enabled": False,
         "auto_send": False,  # si True, simula Enter después de reemplazar (opcional)
-        # True: selecciona TODO el campo antes de corregir (recomendado para chats:
-        # Twitch, Discord, buscadores, etc., donde "todo el campo" = tu mensaje).
-        # False: usa lo que ya tengas seleccionado tú mismo (recomendado para editores
-        # de documentos como Word/LibreOffice, donde Ctrl+A seleccionaría el documento
-        # entero en vez de solo la frase que quieres corregir).
-        # "chat" (por defecto): selecciona automáticamente con chat_select_shortcut
-        # (Ctrl+A) — para chats, buscadores, Notepad, etc., donde "todo el campo"
-        # es tu mensaje. "document": selecciona automáticamente con
-        # document_select_shortcut — para editores de documentos (Word/LibreOffice),
-        # donde Ctrl+A seleccionaría el documento entero; se usa otra combinación
-        # que en tu programa sí selecciona solo el párrafo/frase (por defecto
-        # Ctrl+A también, pero configurable si tu programa usa otra).
-        "select_mode": "chat",
-        "chat_select_shortcut": "ctrl+a",
-        "document_select_shortcut": "ctrl+e",
         "providers": {
             pid: {"enabled": False, "api_key": ""} for pid in PROVIDER_META
         },
@@ -587,104 +573,72 @@ def get_corrected_text_with_fallback(cfg, system_prompt, user_text):
 
 
 # ============================================================
-# REEMPLAZO DE TEXTO A NIVEL DE SISTEMA OPERATIVO
+# AUTOMATIZACIÓN INTELIGENTE DE TEXTO (LÓGICA UNIVERSAL)
 # ============================================================
 
-CLIPBOARD_SETTLE_S = 0.05
+def liberar_teclas_sistema():
+    """Suelta los modificadores del propio atajo para evitar conflictos en Windows."""
+    try:
+        keyboard.release("ctrl")
+        keyboard.release("alt")
+        keyboard.release("shift")
+        keyboard.release("enter")
+    except Exception:
+        pass
+    time.sleep(0.12)
 
 
-def read_focused_field_text(select_all_shortcut="ctrl+a"):
-    """Selecciona todo (con select_all_shortcut) y copia (Ctrl+C) el campo donde
-    esté el foco, devolviendo su contenido actual vía el portapapeles."""
+def capturar_texto_pantalla():
+    """Lee primero el texto que el usuario ya tenga seleccionado. Si no hay,
+    aplica la secuencia universal (End -> Ctrl+Shift+Home) para tomar toda la
+    casilla. Devuelve (texto, era_seleccion_previa, portapapeles_anterior)."""
     previous_clipboard = None
     try:
         previous_clipboard = pyperclip.paste()
     except Exception:
         pass
 
-    # Un valor "centinela" nos permite detectar si el Ctrl+C realmente copió algo.
-    sentinel = "\u0000__AI_TONE_CORRECTOR_EMPTY__\u0000"
-    try:
-        pyperclip.copy(sentinel)
-    except Exception:
-        pass
+    liberar_teclas_sistema()
 
-    # Nos aseguramos de que Ctrl/Alt/Enter (las teclas del propio atajo que disparó
-    # todo esto) ya no sigan "presionadas" a nivel de Windows antes de mandar nuestra
-    # propia combinación — si no, pueden mezclarse con lo que mandamos a continuación
-    # y causar comportamientos raros en la aplicación activa.
-    try:
-        keyboard.release("ctrl")
-        keyboard.release("alt")
-        keyboard.release("enter")
-    except Exception:
-        pass
-    time.sleep(0.15)
-
-    keyboard.send(select_all_shortcut)
-    time.sleep(0.15)
+    # --- FASE 1: ¿el usuario ya tenía texto marcado? ---
+    sentinel = "\u0000__CHEATEXT_SELECTION_EMPTY__\u0000"
+    pyperclip.copy(sentinel)
     keyboard.send("ctrl+c")
-    time.sleep(0.25)
+    time.sleep(0.2)
 
-    try:
-        text = pyperclip.paste()
-    except Exception:
-        text = ""
-    print(f"[CheaText Full][DEBUG] Texto copiado correctamente: {bool(text and text != sentinel)}")
+    texto_marcado = pyperclip.paste()
+    if texto_marcado != sentinel and texto_marcado.strip() != "":
+        print("[CheaText Full][DEBUG] Detectado texto pre-seleccionado por el usuario.")
+        return texto_marcado.strip(), True, previous_clipboard
 
-    if text == sentinel:
-        text = ""  # no había nada seleccionable / Ctrl+C no hizo nada
+    # --- FASE 2: sin selección, secuencia universal de cursor ---
+    print("[CheaText Full][DEBUG] Sin selección. Aplicando secuencia universal (casilla completa).")
+    pyperclip.copy(sentinel)
 
-    return text, previous_clipboard
+    keyboard.send("end")
+    time.sleep(0.06)
+    keyboard.press("ctrl")
+    keyboard.press("shift")
+    keyboard.send("home")
+    keyboard.release("shift")
+    keyboard.release("ctrl")
+    time.sleep(0.06)
 
-
-def read_selected_field_text():
-    """Copia únicamente la selección actual del campo que tiene el foco."""
-    previous_clipboard = None
-    try:
-        previous_clipboard = pyperclip.paste()
-    except Exception:
-        pass
-
-    sentinel = "__AI_TONE_CORRECTOR_NO_SELECTION__"
-    try:
-        pyperclip.copy(sentinel)
-    except Exception:
-        pass
-
-    try:
-        keyboard.release("ctrl")
-        keyboard.release("alt")
-        keyboard.release("enter")
-    except Exception:
-        pass
-    time.sleep(0.15)
     keyboard.send("ctrl+c")
-    time.sleep(0.25)
+    time.sleep(0.2)
 
-    try:
-        text = pyperclip.paste()
-    except Exception:
-        text = ""
-    if text == sentinel:
-        text = ""
-    return text, previous_clipboard
+    texto_casilla = pyperclip.paste()
+    if texto_casilla == sentinel:
+        texto_casilla = ""
+
+    return texto_casilla.strip(), False, previous_clipboard
 
 
-def replace_focused_field_text(new_text, select_all_shortcut="ctrl+a"):
-    """Selecciona todo (con select_all_shortcut) y pega (Ctrl+V) el texto nuevo,
-    reemplazando el contenido del campo."""
-    pyperclip.copy(new_text)
-    time.sleep(CLIPBOARD_SETTLE_S)
-    keyboard.send(select_all_shortcut)
-    time.sleep(CLIPBOARD_SETTLE_S)
-    keyboard.send("ctrl+v")
-
-
-def replace_selected_field_text(new_text):
-    """Pega sobre la selección actual sin volver a seleccionar todo el campo."""
-    pyperclip.copy(new_text)
-    time.sleep(CLIPBOARD_SETTLE_S)
+def escribir_texto_en_pantalla(nuevo_texto):
+    """Pega el texto de la IA sobre la selección que sigue activa (ya sea la que
+    marcó el usuario o la que hizo la secuencia universal)."""
+    pyperclip.copy(nuevo_texto)
+    time.sleep(0.06)
     keyboard.send("ctrl+v")
 
 
@@ -852,33 +806,15 @@ def handle_hotkey(cfg_holder):
             return
         _is_processing = True
 
+    previous_clipboard = None
     try:
         cfg = cfg_holder["cfg"]
-        select_mode = cfg.get("select_mode", "chat")
-        if select_mode == "selection":
-            select_all_shortcut = None
-            original_text, previous_clipboard = read_selected_field_text()
-        elif select_mode == "document":
-            select_all_shortcut = cfg.get("document_select_shortcut", "ctrl+e")
-            original_text, previous_clipboard = read_focused_field_text(
-                select_all_shortcut=select_all_shortcut
-            )
-        else:
-            select_all_shortcut = cfg.get("chat_select_shortcut", "ctrl+a")
-            original_text, previous_clipboard = read_focused_field_text(
-                select_all_shortcut=select_all_shortcut
-            )
-        print(f"[CheaText Full][DEBUG] Modo de selección: {select_mode!r} → usando {select_all_shortcut!r}")
-        original_text = (original_text or "").strip()
-        print(f"[CheaText Full][DEBUG] Texto leído del campo ({len(original_text)} caracteres)")
+
+        original_text, era_seleccion_previa, previous_clipboard = capturar_texto_pantalla()
+        print(f"[CheaText Full][DEBUG] Texto leído ({len(original_text)} caracteres)")
 
         if not original_text:
-            if select_mode == "selection":
-                language = cfg.get("language", "es")
-                get_toast_manager().show(
-                    ui_text("selection_required", language), TOAST_COLOR_RED, 4000
-                )
-            print("[CheaText Full][DEBUG] El texto quedó vacío — no se llama a la IA.")
+            print("[CheaText Full][DEBUG] No se encontró texto — no se llama a la IA.")
             return
 
         system_prompt = build_system_prompt(
@@ -897,10 +833,7 @@ def handle_hotkey(cfg_holder):
             get_toast_manager().show(f"❌ {err}", TOAST_COLOR_RED, 5000)
             return
 
-        if select_mode == "selection":
-            replace_selected_field_text(result_text)
-        else:
-            replace_focused_field_text(result_text, select_all_shortcut=select_all_shortcut)
+        escribir_texto_en_pantalla(result_text)
 
         provider_name = PROVIDER_SHORT_NAMES.get(provider_id, provider_id)
         icon = "🔄" if switched else "🤖"
@@ -917,7 +850,7 @@ def handle_hotkey(cfg_holder):
             keyboard.send("enter")
 
     finally:
-        restore_clipboard(locals().get("previous_clipboard"))
+        restore_clipboard(previous_clipboard)
         with _processing_lock:
             _is_processing = False
 
@@ -1005,7 +938,7 @@ UI_TEXT = {
         "settings_title": "CheaText — Configuración",
         "language": "Idioma:",
         "description": "Corrige, adapta el tono, traduce y/o acorta texto en CUALQUIER programa.",
-        "hotkey": "Para aplicar CheaText, coloca el cursor en la casilla donde escribes y presiona Alt + Enter. El texto se corregirá y aparecerá de nuevo en ese mismo lugar.",
+        "hotkey": "Para aplicar CheaText, coloca el cursor en la casilla donde escribes y presiona Alt + Enter. Si seleccionas texto previamente, solo se procesará el fragmento marcado.",
         "tone_section": "TONO DE ESCRITURA",
         "additional_section": "OPCIONES ADICIONALES",
         "translate": "Traducir a otro idioma",
@@ -1013,16 +946,6 @@ UI_TEXT = {
         "to": "A:",
         "shorten": "Acortar el texto",
         "auto_send": "Enviar automáticamente (simular Enter) — más riesgoso",
-        "selection_section": "MODO DE SELECCIÓN",
-        "selection_description": "Elige si el programa selecciona el campo o si procesa solo una selección que tú marques.",
-        "chat_mode": "Modo CHAT",
-        "chat_description": "Twitch, Discord, buscadores, Notepad...",
-        "document_mode": "Modo DOCUMENTO",
-        "document_description": "Word, LibreOffice y otros editores de documentos",
-        "user_selection_mode": "SELECCIÓN DEL USUARIO",
-        "user_selection_description": "Corrige únicamente el texto que marques antes de pulsar Alt+Enter",
-        "selection_shortcut": "Atajo de selección:",
-        "selection_required": "Selecciona un texto antes de pulsar Alt+Enter.",
         "providers_section": "PROVEEDORES DE IA",
         "providers_description": "Respaldo automático, en orden de prioridad.",
         "security_tip": "Consejo de seguridad: nunca compartas tus API keys ni las publiques en internet.",
@@ -1041,10 +964,10 @@ UI_TEXT = {
         "corrected": "Corregido con",
     },
     "en": {
-        "settings_title": "CheaText — Settings",
+        "settings_ticon_pathitle": "CheaText — Settings",
         "language": "Language:",
         "description": "Correct, adapt the tone, translate and/or shorten text in ANY program.",
-        "hotkey": "To apply CheaText, place the cursor in the field where you are writing and press Alt + Enter. The text will be corrected and placed back in the same field.",
+        "hotkey": "To apply CheaText, place the cursor in the field where you are writing and press Alt + Enter. If text is pre-selected, only that snippet will be processed.",
         "tone_section": "WRITING TONE",
         "additional_section": "ADDITIONAL OPTIONS",
         "translate": "Translate to another language",
@@ -1052,16 +975,6 @@ UI_TEXT = {
         "to": "To:",
         "shorten": "Shorten the text",
         "auto_send": "Send automatically (simulate Enter) — riskier",
-        "selection_section": "SELECTION MODE",
-        "selection_description": "Choose whether the program selects the field or processes only text you mark.",
-        "chat_mode": "CHAT MODE",
-        "chat_description": "Twitch, Discord, search boxes, Notepad...",
-        "document_mode": "DOCUMENT MODE",
-        "document_description": "Word, LibreOffice and other document editors",
-        "user_selection_mode": "USER SELECTION",
-        "user_selection_description": "Correct only the text you mark before pressing Alt+Enter",
-        "selection_shortcut": "Selection shortcut:",
-        "selection_required": "Select some text before pressing Alt+Enter.",
         "providers_section": "AI PROVIDERS",
         "providers_description": "Automatic fallback, in priority order.",
         "security_tip": "Security tip: never share your API keys or publish them online.",
@@ -1388,93 +1301,6 @@ class SettingsWindow:
             extra_section, self._t("auto_send"), self.auto_send_var
         )
 
-        # --- Modo de selección (chat vs documento) — dos casillas independientes ---
-        select_section = tk.Frame(content, bg=COLOR_BG)
-        select_section.pack(fill="x", **pad)
-        self._label(select_section, self._t("selection_section"), size=9, bold=True, muted=True).pack(anchor="w", pady=(0, 4))
-        self._label(
-            select_section,
-            self._t("selection_description"),
-            size=8, muted=True,
-        ).pack(anchor="w", pady=(0, 8))
-
-        self.chat_mode_var = tk.BooleanVar(value=True)
-        self.document_mode_var = tk.BooleanVar(value=False)
-        self.user_selection_mode_var = tk.BooleanVar(value=False)
-
-        chat_mode_card = tk.Frame(select_section, bg=COLOR_CARD, highlightthickness=1,
-                                   highlightbackground=COLOR_BORDER)
-        chat_mode_card.pack(fill="x", pady=(0, 6))
-        chat_mode_top = tk.Frame(chat_mode_card, bg=COLOR_CARD)
-        chat_mode_top.pack(fill="x", padx=10, pady=(8, 2))
-        self.chat_mode_check_lbl = tk.Label(
-            chat_mode_top, text="☑", bg=COLOR_CARD, fg=COLOR_ACCENT,
-            font=(FONT_FAMILY, 12), cursor="hand2",
-        )
-        self.chat_mode_check_lbl.pack(side="left")
-        self.chat_mode_check_lbl.bind("<Button-1>", lambda e: self._set_select_mode("chat", True))
-        chat_title = tk.Label(chat_mode_top, text=self._t("chat_mode"), bg=COLOR_CARD, fg=COLOR_TEXT,
-                               font=(FONT_FAMILY, 10, "bold"), cursor="hand2")
-        chat_title.pack(side="left", padx=(6, 0))
-        chat_title.bind("<Button-1>", lambda e: self._set_select_mode("chat", True))
-        self._label(chat_mode_card, self._t("chat_description"), size=8, muted=True).pack(
-            anchor="w", padx=34, pady=(0, 6)
-        )
-        chat_shortcut_row = tk.Frame(chat_mode_card, bg=COLOR_CARD)
-        chat_shortcut_row.pack(fill="x", padx=10, pady=(0, 10))
-        self._label(chat_shortcut_row, self._t("selection_shortcut"), size=8, muted=True).pack(side="left")
-        self.chat_select_shortcut_entry = self._entry(chat_shortcut_row, width=10)
-        self.chat_select_shortcut_entry.pack(side="left", padx=6)
-
-        doc_mode_card = tk.Frame(select_section, bg=COLOR_CARD, highlightthickness=1,
-                                  highlightbackground=COLOR_BORDER)
-        doc_mode_card.pack(fill="x")
-        doc_mode_top = tk.Frame(doc_mode_card, bg=COLOR_CARD)
-        doc_mode_top.pack(fill="x", padx=10, pady=(8, 2))
-        self.document_mode_check_lbl = tk.Label(
-            doc_mode_top, text="☐", bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
-            font=(FONT_FAMILY, 12), cursor="hand2",
-        )
-        self.document_mode_check_lbl.pack(side="left")
-        self.document_mode_check_lbl.bind("<Button-1>", lambda e: self._set_select_mode("document", True))
-        doc_title = tk.Label(doc_mode_top, text=self._t("document_mode"), bg=COLOR_CARD, fg=COLOR_TEXT,
-                              font=(FONT_FAMILY, 10, "bold"), cursor="hand2")
-        doc_title.pack(side="left", padx=(6, 0))
-        doc_title.bind("<Button-1>", lambda e: self._set_select_mode("document", True))
-        self._label(doc_mode_card, self._t("document_description"), size=8, muted=True).pack(
-            anchor="w", padx=34, pady=(0, 6)
-        )
-        doc_shortcut_row = tk.Frame(doc_mode_card, bg=COLOR_CARD)
-        doc_shortcut_row.pack(fill="x", padx=10, pady=(0, 10))
-        self._label(doc_shortcut_row, self._t("selection_shortcut"), size=8, muted=True).pack(side="left")
-        self.document_select_shortcut_entry = self._entry(doc_shortcut_row, width=10)
-        self.document_select_shortcut_entry.pack(side="left", padx=6)
-
-        user_selection_card = tk.Frame(select_section, bg=COLOR_CARD, highlightthickness=1,
-                                       highlightbackground=COLOR_BORDER)
-        user_selection_card.pack(fill="x", pady=(6, 0))
-        user_selection_top = tk.Frame(user_selection_card, bg=COLOR_CARD)
-        user_selection_top.pack(fill="x", padx=10, pady=(8, 2))
-        self.user_selection_mode_check_lbl = tk.Label(
-            user_selection_top, text="☐", bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
-            font=(FONT_FAMILY, 12), cursor="hand2",
-        )
-        self.user_selection_mode_check_lbl.pack(side="left")
-        self.user_selection_mode_check_lbl.bind(
-            "<Button-1>", lambda e: self._set_select_mode("selection", True)
-        )
-        user_selection_title = tk.Label(
-            user_selection_top, text=self._t("user_selection_mode"), bg=COLOR_CARD,
-            fg=COLOR_TEXT, font=(FONT_FAMILY, 10, "bold"), cursor="hand2",
-        )
-        user_selection_title.pack(side="left", padx=(6, 0))
-        user_selection_title.bind(
-            "<Button-1>", lambda e: self._set_select_mode("selection", True)
-        )
-        self._label(
-            user_selection_card, self._t("user_selection_description"), size=8, muted=True
-        ).pack(anchor="w", padx=34, pady=(0, 10))
-
         # --- Proveedores ---
         prov_section = tk.Frame(content, bg=COLOR_BG)
         prov_section.pack(fill="both", expand=True, **pad)
@@ -1573,27 +1399,6 @@ class SettingsWindow:
             self.to_combo.configure(state=state)
         except tk.TclError:
             pass
-
-    # ---- modo de selección ----
-
-    def _set_select_mode(self, mode, mark_dirty=False):
-        if mark_dirty:
-            self._mark_config_dirty()
-        self.chat_mode_var.set(mode == "chat")
-        self.document_mode_var.set(mode == "document")
-        self.user_selection_mode_var.set(mode == "selection")
-        self.chat_mode_check_lbl.configure(
-            text="☑" if mode == "chat" else "☐",
-            fg=COLOR_ACCENT if mode == "chat" else COLOR_TEXT_MUTED,
-        )
-        self.document_mode_check_lbl.configure(
-            text="☑" if mode == "document" else "☐",
-            fg=COLOR_ACCENT if mode == "document" else COLOR_TEXT_MUTED,
-        )
-        self.user_selection_mode_check_lbl.configure(
-            text="☑" if mode == "selection" else "☐",
-            fg=COLOR_ACCENT if mode == "selection" else COLOR_TEXT_MUTED,
-        )
 
     # ---- proveedores ----
 
@@ -1723,13 +1528,6 @@ class SettingsWindow:
         self.shorten_var.set(cfg.get("shorten_enabled", False))
         self.auto_send_var.set(cfg.get("auto_send", False))
 
-        mode = cfg.get("select_mode", "chat")
-        self._set_select_mode(mode)
-        self.chat_select_shortcut_entry.delete(0, tk.END)
-        self.chat_select_shortcut_entry.insert(0, cfg.get("chat_select_shortcut", "ctrl+a"))
-        self.document_select_shortcut_entry.delete(0, tk.END)
-        self.document_select_shortcut_entry.insert(0, cfg.get("document_select_shortcut", "ctrl+e"))
-
         self._provider_order = list(cfg.get("provider_order", DEFAULT_PROVIDER_ORDER))
         self._providers_data = {
             pid: dict(cfg.get("providers", {}).get(pid, {"enabled": False, "api_key": ""}))
@@ -1762,12 +1560,6 @@ class SettingsWindow:
         cfg["to_lang"] = to_lang
         cfg["shorten_enabled"] = self.shorten_var.get()
         cfg["auto_send"] = self.auto_send_var.get()
-        cfg["select_mode"] = (
-            "selection" if self.user_selection_mode_var.get()
-            else "chat" if self.chat_mode_var.get() else "document"
-        )
-        cfg["chat_select_shortcut"] = self.chat_select_shortcut_entry.get().strip() or "ctrl+a"
-        cfg["document_select_shortcut"] = self.document_select_shortcut_entry.get().strip() or "ctrl+e"
         cfg["providers"] = self._providers_data
         cfg["provider_order"] = self._provider_order
         save_config(cfg)
@@ -1794,12 +1586,6 @@ class SettingsWindow:
         cfg["to_lang"] = self._language_code(self.to_combo.get(), cfg.get("to_lang", DEFAULT_TO_LANG))
         cfg["shorten_enabled"] = self.shorten_var.get()
         cfg["auto_send"] = self.auto_send_var.get()
-        cfg["select_mode"] = (
-            "selection" if self.user_selection_mode_var.get()
-            else "chat" if self.chat_mode_var.get() else "document"
-        )
-        cfg["chat_select_shortcut"] = self.chat_select_shortcut_entry.get().strip() or "ctrl+a"
-        cfg["document_select_shortcut"] = self.document_select_shortcut_entry.get().strip() or "ctrl+e"
         cfg["providers"] = self._providers_data
         cfg["provider_order"] = self._provider_order
 
@@ -1834,7 +1620,28 @@ class SettingsWindow:
         self._build_widgets()
         self._load_from_config()
 
-    def show(self):
+    # ---- mostrar / ocultar (la ventana es única y persistente) ----
+
+    def hide(self):
+        self.root.withdraw()
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
+    def toggle(self):
+        if self.root.state() in ("normal", "zoomed"):
+            self.hide()
+        else:
+            self.show_window()
+
+    def run(self):
         self.root.mainloop()
 
 
@@ -1859,18 +1666,49 @@ def _make_tray_image():
     return img
 
 
-def open_settings(cfg_holder):
-    def _run():
-        window = SettingsWindow(cfg_holder)
-        window.show()
+_settings_commands = queue.Queue()
+_settings_thread = None
+_settings_thread_lock = threading.Lock()
 
-    # Tkinter debe correr en su propio hilo separado del listener de teclado.
-    threading.Thread(target=_run, daemon=True).start()
+
+def _settings_thread_main(cfg_holder):
+    window = SettingsWindow(cfg_holder)
+    # La "X" de la ventana solo la oculta, para poder volver a mostrarla desde la bandeja.
+    window.root.protocol("WM_DELETE_WINDOW", window.hide)
+
+    def poll():
+        try:
+            while True:
+                command = _settings_commands.get_nowait()
+                if command == "toggle":
+                    window.toggle()
+                elif command == "show":
+                    window.show_window()
+        except queue.Empty:
+            pass
+        window.root.after(100, poll)
+
+    window.root.after(100, poll)
+    window.run()
+
+
+def toggle_settings(cfg_holder):
+    """Primer clic: crea y muestra la ventana. Después: alterna mostrar/ocultar
+    la MISMA ventana (nunca abre una nueva). Tkinter corre en su propio hilo."""
+    global _settings_thread
+    with _settings_thread_lock:
+        if _settings_thread is None or not _settings_thread.is_alive():
+            _settings_thread = threading.Thread(
+                target=_settings_thread_main, args=(cfg_holder,), daemon=True
+            )
+            _settings_thread.start()
+            return
+    _settings_commands.put("toggle")
 
 
 def build_tray(cfg_holder):
     def on_open_settings(icon, item):
-        open_settings(cfg_holder)
+        toggle_settings(cfg_holder)
 
     def on_quit(icon, item):
         icon.stop()
@@ -1916,7 +1754,7 @@ def main():
         conf.get("enabled") and conf.get("api_key") for conf in cfg_holder["cfg"]["providers"].values()
     )
     if not has_any_provider:
-        open_settings(cfg_holder)
+        toggle_settings(cfg_holder)
 
     tray_icon.run()  # bloqueante: mantiene vivo el programa (ícono en la bandeja)
 

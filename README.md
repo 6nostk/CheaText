@@ -1,37 +1,39 @@
 # CheaText
 
-CheaText es una aplicación de Windows que corrige, traduce, acorta y reescribe texto con IA en cualquier campo de escritura.
+[Español](#español) | [English](#english-documentation)
 
-## Descargar para Windows
+---
 
-Los instaladores se publican en la sección **Releases** de GitHub:
+## Español
 
-- `CheaText-setup-premium.exe`
-- `CheaText-setup.exe`
+CheaText es una aplicación nativa de escritorio para Windows que corrige, adapta el tono, traduce y reescribe texto utilizando Inteligencia Artificial directamente en **CUALQUIER** campo de escritura del sistema operativo.
 
-No es necesario instalar Python. Después de instalar CheaText, abre la configuración, activa al menos un proveedor de IA e introduce su API key. Las claves se almacenan protegidas en Windows y nunca deben publicarse en GitHub.
+### 🧠 Selección Inteligente Automática
+CheaText analiza tus acciones en tiempo real:
+1. **Con selección de texto:** Corrige únicamente el fragmento seleccionado.
+2. **Sin selección de texto:** Ejecuta una secuencia universal para capturar y reescribir todo el cuadro de texto.
 
-## Uso
+### 🚀 Uso y Configuración
+1. Coloca el cursor en la casilla o selecciona un texto y presiona `Alt + Enter`.
+2. Los instaladores se encuentran en la sección **Releases** de GitHub (`CheaText-setup.exe`). No requieres Python; configura tu API Key de forma cifrada mediante Windows DPAPI.
 
-1. Coloca el cursor en la casilla donde estás escribiendo.
-2. Presiona `Alt + Enter`.
-3. CheaText procesa el texto y lo devuelve en el mismo campo.
+Para desarrollo e instalación manual, clona el repositorio, instala dependencias con `pip install -r requirements.txt`, ejecuta `app.py` o compila con PyInstaller e Inno Setup.
 
-## Desarrollo
+---
 
-Requisitos: Windows y Python 3.10 o superior.
+## English Documentation
 
-```powershell
-pip install -r requirements.txt
-python app.py
-```
+CheaText is a native Windows desktop application that corrects, adapts tone, translates, and rewrites text using AI universally within **ANY** OS input field.
 
-Para generar el ejecutable:
+### 🧠 Smart Automatic Selection
+CheaText analyzes your actions in real time:
+1. **With Text Selection:** Processes and replaces only the highlighted snippet.
+2. **Without Text Selection:** Triggers a universal sequence to capture and rewrite the entire text box.
 
-```powershell
-pyinstaller --clean --noconfirm CheaText.spec
-```
+### 🚀 Usage and Setup
+1. Place your cursor or select text and press the global hotkey `Alt + Enter`.
+2. Pre-compiled installers are available in GitHub **Releases** (`CheaText-setup.exe`). Python is not required; your API keys are safely encrypted locally via Windows DPAPI.
 
-Los instaladores se compilan con Inno Setup usando `CheaTextInstaller.iss` o `CheaTextInstallerPremium.iss`.
+For development and manual setup, clone the repository, install dependencies via `pip install -r requirements.txt`, run `app.py`, or build using PyInstaller and Inno Setup.
 
-Consulta `LEEME.md` para la documentación completa en español o `LEEME-en.md` para la versión en inglés.
+
